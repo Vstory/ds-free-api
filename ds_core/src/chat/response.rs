@@ -92,6 +92,8 @@ impl SessionHandle {
 
 const FRAG_THINK: &str = "THINK";
 const FRAG_RESPONSE: &str = "RESPONSE";
+/// 网页端同样把模板类片段当正文（`RESPONSE_TYPES:["RESPONSE","TEMPLATE_RESPONSE"]`）
+const FRAG_TEMPLATE_RESPONSE: &str = "TEMPLATE_RESPONSE";
 
 /// Fragment 状态
 ///
@@ -268,7 +270,7 @@ impl PatchState {
                     .and_then(take_string)
                     .unwrap_or_default();
                 let is_think = ty == FRAG_THINK;
-                let is_response = ty == FRAG_RESPONSE;
+                let is_response = is_response_frag(&ty);
                 if is_response && !content.is_empty() {
                     self.response_has_content = true;
                 }
@@ -314,11 +316,49 @@ impl PatchState {
                 {
                     match frag.ty.as_str() {
                         FRAG_THINK => events.push(StreamEvent::ThinkDelta { content: s }),
-                        FRAG_RESPONSE => {
+                        ty if is_response_frag(ty) => {
                             self.response_has_content = true;
                             events.push(StreamEvent::ContentDelta { content: s });
                         }
                         _ => {}
+                    }
+                }
+            }
+            // 2026-11 起上游在回答开始时用 SET 整体替换 fragments 数组（含新的 RESPONSE 片段），
+            // 不再是 APPEND。只认 APPEND 会丢掉 RESPONSE：正文被拼进 THINK、首片丢失，
+            // 于是 content 为空而 status 仍是 FINISHED（issue #125）。
+            // 已知片段只更新类型（内容走流式追加），新增片段才发出它的初始内容。
+            "response/fragments" | "/response/fragments" if op == "SET" && val.is_array() => {
+                let known = self.fragments.len();
+                if let Some(arr) = val.as_array_mut() {
+                    for (i, item) in arr.iter_mut().enumerate() {
+                        let Some(obj) = item.as_object_mut() else {
+                            continue;
+                        };
+                        let Some(ty) = obj.remove("type").and_then(take_string_owned) else {
+                            continue;
+                        };
+                        if i < known {
+                            if let Some(frag) = self.fragments.get_mut(i) {
+                                frag.ty = ty;
+                            }
+                            continue;
+                        }
+                        let content = obj
+                            .get_mut("content")
+                            .and_then(take_string)
+                            .unwrap_or_default();
+                        let is_think = ty == FRAG_THINK;
+                        let is_response = is_response_frag(&ty);
+                        if !content.is_empty() {
+                            if is_think {
+                                events.push(StreamEvent::ThinkDelta { content });
+                            } else if is_response {
+                                self.response_has_content = true;
+                                events.push(StreamEvent::ContentDelta { content });
+                            }
+                        }
+                        self.fragments.push(Fragment { ty });
                     }
                 }
             }
@@ -336,7 +376,7 @@ impl PatchState {
                             .and_then(take_string)
                             .unwrap_or_default();
                         let is_think = ty == FRAG_THINK;
-                        let is_response = ty == FRAG_RESPONSE;
+                        let is_response = is_response_frag(&ty);
                         if !content.is_empty() {
                             if is_think {
                                 events.push(StreamEvent::ThinkDelta { content });
@@ -362,6 +402,11 @@ fn take_string(val: &mut serde_json::Value) -> Option<String> {
         serde_json::Value::String(s) => Some(std::mem::take(s)),
         _ => None,
     }
+}
+
+/// 正文片段判定：RESPONSE 与 TEMPLATE_RESPONSE 都算回答内容
+fn is_response_frag(ty: &str) -> bool {
+    ty == FRAG_RESPONSE || ty == FRAG_TEMPLATE_RESPONSE
 }
 
 /// 取出 `serde_json::Value` 内部字符串的所有权
