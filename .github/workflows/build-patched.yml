@@ -1,0 +1,48 @@
+name: Build patched binary
+
+# 只为产出 Linux x86_64 二进制：先把前端构建到 web/dist（rust_embed 在编译期嵌入，
+# 缺目录会静默生成空资源、管理面板整块丢失），再编译 Rust。
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: web/.bun-version
+
+      - name: Build frontend
+        working-directory: web
+        run: |
+          bun install --frozen-lockfile
+          bun run build
+
+      - name: Install Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+
+      - name: Install build dependencies
+        run: sudo apt-get update && sudo apt-get install -y cmake g++ libclang-dev
+
+      - name: Build
+        run: cargo build --release --locked --target x86_64-unknown-linux-gnu
+
+      - name: Check output
+        run: |
+          test -f web/dist/index.html
+          ls -lh target/x86_64-unknown-linux-gnu/release/ds-free-api
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ds-free-api-linux-x86_64
+          path: target/x86_64-unknown-linux-gnu/release/ds-free-api
+          if-no-files-found: error
